@@ -1,49 +1,95 @@
 # Axioms-QuantumLab — Computational & Theoretical Quantum Physics
 
-Bienvenue dans **Axioms-QuantumLab**, un dépôt regroupant une collection de scripts et de moteurs de simulation Python dédiés à la physique quantique computationnelle. 
+Bienvenue dans **Axioms-QuantumLab**, un laboratoire computationnel transversal dédié à la simulation et à l'étude de systèmes de physique quantique. Le dépôt couvre un large spectre, allant des qubits supraconducteurs (cQED) aux systèmes topologiques, en passant par le magnétisme et les systèmes quantiques ouverts.
 
-Ce laboratoire explore divers paradigmes de la physique moderne : des qubits supraconducteurs (cQED) aux systèmes topologiques, en passant par le magnétisme, les systèmes quantiques ouverts et les formalismes théoriques alternatifs.
+## 🧭 Statut épistémique et méthodologie
 
-## 🧭 Statut Épistémique
+Axioms-QuantumLab distingue explicitement trois niveaux de formalisation :
 
-Une attention particulière est portée à la distinction entre :
-1. **Les observables physiques** (Hamiltoniens, matrices de densité, phases géométriques, équations maîtresses).
-2. **Les abstractions formelles** (les couches de projection comme "sensoriel", "langagier" ou "métacognition" dans certains scripts). 
-3. **Les interprétations spéculatives** (toute analogie avec la conscience ou l'expérience subjective est explicitement documentée comme une métaphore formelle, non comme une preuve expérimentale).
+1. **Niveau physique** — Hamiltoniens, opérateurs, matrices de densité, observables, équations maîtresses et grandeurs dérivées. Les résultats sont interprétés dans le cadre des hypothèses physiques propres à chaque modèle.
+2. **Niveau formel et computationnel** — Espaces de représentation, opérateurs de projection, variables latentes et architectures mathématiques destinées à explorer des correspondances entre différents formalismes.
+3. **Niveau interprétatif et exploratoire** — Analogies conceptuelles, notamment celles reliant les structures physiques à des notions de cognition, de perception ou de conscience. Ces correspondances sont considérées comme des hypothèses ou des métaphores formelles, et non comme des résultats expérimentaux.
+
+### Principes de validation
+
+Les résultats numériques sont accompagnés, selon la nature du problème, de contrôles portant sur :
+- la conservation des grandeurs physiques pertinentes (norme, énergie) ;
+- la convergence numérique et la sensibilité aux paramètres ;
+- les symétries et invariances attendues ;
+- la stabilité des algorithmes ;
+- la comparaison avec des solutions analytiques ou des références connues ;
+- la reproductibilité des simulations.
+
+*La réussite d'un test numérique valide le comportement attendu de l'implémentation dans les conditions testées. Elle ne constitue pas, à elle seule, une validation expérimentale du modèle physique.*
+
+---
 
 ## 📂 Architecture des Scripts
 
 Les scripts sont organisés par domaine de recherche :
 
 ### 1. cQED & Qubits Supraconducteurs
-*   `fluxonium_psi.py` : Modélisation complète d'un qubit Fluxonium. Calcul du spectre, des temps de cohérence (T1, T2), de la phase géométrique de Berry et de la métrique de Fubini-Study. Inclut une couche de projection formelle.
-*   `transmon_lindblad.py` / `transmon_analyzer.py` : Analyse des décohérences et de la dynamique d'un qubit Transmon via l'équation de Lindblad.
+*   `fluxonium_psi.py` : Modélisation complète d'un qubit Fluxonium. Calcul du spectre, des temps de cohérence (T1/T2), de la phase géométrique de Berry et de la métrique de Fubini-Study. *Précision : les estimations T1/T2 reposent sur des mécanismes phénoménologiques spécifiques (perte diélectrique, quasi-particules, bruit de flux), dont les hypothèses sont documentées dans le code.*
+*   `transmon_lindblad.py` / `transmon_analyzer.py` : Analyse des décohérences et de la dynamique d'un qubit Transmon.
 *   `run_transmon_spec.py` : Génération de spectres pour le Transmon.
 
 ### 2. Topologie & Matière Condensée
-*   `ssh_kitaev_compare.py` : Étude comparative des modèles topologiques SSH (Su-Schrieffer-Heeger) et de la chaîne de Kitaev (modèle de Majorana).
-*   `fix_hubbard.py` : Exploration du modèle de Hubbard (interactions électroniques fortes).
-*   `v99_skyrmion_2d.py` : Génération d'un champ de spins 2D (skyrmion) et calcul de sa charge topologique.
+*   `ssh_kitaev_compare.py` : Étude comparative des modèles topologiques SSH et de la chaîne de Kitaev (Majorana).
+*   `fix_hubbard.py` : Exploration du modèle de Hubbard.
+*   `v99_skyrmion_2d.py` : Génération d'un champ de spins 2D (skyrmion) et calcul de la charge topologique. *Méthode : discrétisation par différences finies (gradients explicites dx/dy) sur grille avec conditions aux bords libres.*
 
 ### 3. Magnétisme & Ondes de Spin (Magnons)
 *   `v100_magnon_dispersion.py` : Calcul de la relation de dispersion des magnons 1D pour un modèle de Heisenberg ferromagnétique.
-*   `v101_magnon_packet.py` : Simulation dynamique spatio-temporelle d'un paquet d'ondes de spin via Transformée de Fourier Rapide (FFT).
+*   `v101_magnon_packet.py` : Simulation dynamique spatio-temporelle d'un paquet d'ondes de spin via Transformée de Fourier Rapide (FFT). *Méthode : propagation spectrale exacte dans le modèle discret considéré.*
 
 ### 4. HPC & Systèmes Quantiques Ouverts
-*   `moteur_ste50.py` : Moteur de calcul haute performance (HPC via Numba) couplant hystérésis macroscopique et dynamique quantique. Résout l'équation maîtresse de Lindblad via Monte Carlo parallélisé. **(Génère automatiquement des rapports scientifiques au format DOCX)**.
+*   `moteur_ste50.py` : Moteur HPC (Numba) couplant hystérésis macroscopique et dynamique quantique. *Méthode : résolution par trajectoires quantiques (quantum trajectories / Monte Carlo wave-function) pour simuler l'équation maîtresse de Lindblad via un estimateur de moyenne sur trajectoires parallélisées.* **(Génère des rapports scientifiques au format DOCX)**.
 
 ### 5. Fondements & Formalismes Alternatifs
 *   `bohm_hydro_mapping.py` : Exploration de la mécanique quantique de de Broglie-Bohm (interprétation hydrodynamique).
-*   `run_hamiltonian.py` / `update_omega.py` / `scan_parameters.py` : Utilitaires de balayage paramétrique et d'évolution d'Hamiltoniens génériques.
+*   `run_hamiltonian.py` / `update_omega.py` / `scan_parameters.py` : Utilitaires de balayage paramétrique et d'évolution d'Hamiltoniens.
 
-## 🛠️ Installation
+---
 
-Prérequis : Python 3.9 ou plus récent.
+## 🔬 Détails des modules d'audit
 
-```bash
-# Cloner le dépôt
-git clone https://github.com/berryberryship-debug/Axioms-QuantumLab.git
-cd Axioms-QuantumLab
+### V99 — Champ de spins 2D et charge topologique
+**[Observé numériquement]** Le script construit un ansatz analytique statique de type skyrmion. La densité topologique est calculée via la décomposition explicite des gradients spatiaux. La simulation donne une charge intégrée proche de \(Q \approx -1\).
+**[Limite]** Existence mathématique d'une configuration non triviale. Pas de simulation de dynamique (LLG) ni de stabilisation physique (DMI).
 
-# Installer les dépendances
-pip install -r requirements.txt
+### V100 — Dispersion des Magnons 1D
+**[Démontré]** Théorie linéaire des ondes de spin (Heisenberg). Calcul de l'énergie \(E(q) = \hbar\omega(q)\) et de la vitesse physique en m/s.
+**[Observé numériquement]** Dispersion quadratique près de \(\Gamma\) (\(E \propto q^2\)), contrairement aux phonons acoustiques. Vitesse maximale \(\approx 152\) m/s pour les paramètres par défaut.
+**[Limite]** Modèle à une particule (Holstein-Primakoff), sans interactions magnon-magnon ni amortissement.
+
+### V101 — Dynamique et propagation d'un paquet d'ondes
+**[Modèle et méthode]** Propagation spatio-temporelle d'un paquet gaussien par FFT.
+**[Observé numériquement]** Validation stricte sur 4 critères :
+1. Conservation de la norme (unitarité).
+2. Conservation de l'énergie moyenne.
+3. Vitesse du centroïde correspondant à la vitesse moyenne du paquet spectral.
+4. Étalement spatial (GVD) suivant l'approximation analytique.
+**[Limites]** Centroïde linéaire valide uniquement sans traversée de la coupure périodique (vérifié par test de probabilité aux bords). Approx. des ondes de spin non-interagissantes.
+
+---
+
+## 🛡️ Validation numérique & Reproductibilité
+
+Ce dépôt intègre des critères de validation pour distinguer les prototypes exploratoires des moteurs ayant passé un protocole de test. Chaque script documente ses invariants (ex : conservation de l'énergie ou de la norme) et ses tests de symétrie. Les paramètres de référence et les seuils de validation (ex : tolérances d'assertion) sont fixés dans le code pour garantir la reproductibilité des simulations.
+
+> **Note de développement :** Un registre de validation transversal est en cours de structuration pour centraliser le statut, les tests et les limites de chaque module.
+
+---
+
+## 📌 Niveau de preuve
+
+| Niveau | Signification |
+|---|---|
+| **[Démontré]** | Propriété mathématique ou test reproductible du code |
+| **[Modèle et méthode]** | Algorithme exact pour un modèle physique donné, sans prétendre à l'exactitude du modèle réel |
+| **[Observé numériquement]** | Résultat obtenu pour un jeu de paramètres et une grille donnés |
+| **[Hypothèse]** | Piste physique, extension ou interprétation non encore validée |
+| **[Limite]** | Restriction explicite de la portée d’un résultat ou d’un test |
+
+---
+*Développé sur Termux et VS Code. Architecture et validation scientifique itératives.*
