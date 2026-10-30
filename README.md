@@ -20,7 +20,7 @@ Les résultats numériques sont accompagnés, selon la nature du problème, de c
 - la comparaison avec des solutions analytiques ou des références connues ;
 - la reproductibilité des simulations.
 
-*La réussite d'un test numérique valide le comportement attendu de l'implémentation dans les conditions testées. Elle ne constitue pas, à elle seule, une validation expérimentale du modèle physique.*
+*Règle d'or : La validation d'un calcul numérique ne doit jamais être confondue avec la validation de l'interprétation physique qu'on lui associe.*
 
 ---
 
@@ -29,7 +29,7 @@ Les résultats numériques sont accompagnés, selon la nature du problème, de c
 Les scripts sont organisés par domaine de recherche :
 
 ### 1. cQED & Qubits Supraconducteurs
-*   `fluxonium_psi.py` : Modélisation complète d'un qubit Fluxonium. Calcul du spectre, des temps de cohérence (T1/T2), de la phase géométrique de Berry et de la métrique de Fubini-Study. *Précision : les estimations T1/T2 reposent sur des mécanismes phénoménologiques spécifiques (perte diélectrique, quasi-particules, bruit de flux), dont les hypothèses sont documentées dans le code.*
+*   `fluxonium_psi.py` : Modélisation d'un qubit Fluxonium. Calcul du spectre, des temps de cohérence (T1/T2), de la phase géométrique de Berry et de la métrique de Fubini-Study. *Note : Les mécanismes de décohérence (perte diélectrique, quasi-particules, bruit de flux) sont implémentés de manière phénoménologique, avec des hypothèses explicites dans le code.*
 *   `transmon_lindblad.py` / `transmon_analyzer.py` : Analyse des décohérences et de la dynamique d'un qubit Transmon.
 *   `run_transmon_spec.py` : Génération de spectres pour le Transmon.
 
@@ -43,7 +43,7 @@ Les scripts sont organisés par domaine de recherche :
 *   `v101_magnon_packet.py` : Simulation dynamique spatio-temporelle d'un paquet d'ondes de spin via Transformée de Fourier Rapide (FFT). *Méthode : propagation spectrale exacte dans le modèle discret considéré.*
 
 ### 4. HPC & Systèmes Quantiques Ouverts
-*   `moteur_ste50.py` : Moteur HPC (Numba) couplant hystérésis macroscopique et dynamique quantique. *Méthode : résolution par trajectoires quantiques (quantum trajectories / Monte Carlo wave-function) pour simuler l'équation maîtresse de Lindblad via un estimateur de moyenne sur trajectoires parallélisées.* **(Génère des rapports scientifiques au format DOCX)**.
+*   `moteur_ste50.py` : Moteur HPC (Numba) couplant hystérésis macroscopique et dynamique quantique. *Méthode : résolution par trajectoires quantiques (quantum trajectories / Monte Carlo wave-function) pour l'équation maîtresse de Lindblad via un estimateur de moyenne sur trajectoires parallélisées.* **(Génère des rapports DOCX)**.
 
 ### 5. Fondements & Formalismes Alternatifs
 *   `bohm_hydro_mapping.py` : Exploration de la mécanique quantique de de Broglie-Bohm (interprétation hydrodynamique).
@@ -58,17 +58,13 @@ Les scripts sont organisés par domaine de recherche :
 **[Limite]** Existence mathématique d'une configuration non triviale. Pas de simulation de dynamique (LLG) ni de stabilisation physique (DMI).
 
 ### V100 — Dispersion des Magnons 1D
-**[Démontré]** Théorie linéaire des ondes de spin (Heisenberg). Calcul de l'énergie \(E(q) = \hbar\omega(q)\) et de la vitesse physique en m/s.
-**[Observé numériquement]** Dispersion quadratique près de \(\Gamma\) (\(E \propto q^2\)), contrairement aux phonons acoustiques. Vitesse maximale \(\approx 152\) m/s pour les paramètres par défaut.
+**[Démontré analytiquement]** Théorie linéaire des ondes de spin (Heisenberg). Formule \(E(q) = 2JS[1-\cos(qa)]\) et vitesse de groupe \(v_g = \frac{2JSa}{\hbar}\sin(qa)\).
+**[Vérifié numériquement]** Pour les paramètres de référence (\(J=1.0\) meV, \(S=0.5\), \(a=1.0\) Å), la vitesse physique maximale calculée est de \(151.93\) m/s. La dispersion est quadratique près de \(\Gamma\) (\(E \propto q^2\)).
 **[Limite]** Modèle à une particule (Holstein-Primakoff), sans interactions magnon-magnon ni amortissement.
 
 ### V101 — Dynamique et propagation d'un paquet d'ondes
-**[Modèle et méthode]** Propagation spatio-temporelle d'un paquet gaussien par FFT.
-**[Observé numériquement]** Validation stricte sur 4 critères :
-1. Conservation de la norme (unitarité).
-2. Conservation de l'énergie moyenne.
-3. Vitesse du centroïde correspondant à la vitesse moyenne du paquet spectral.
-4. Étalement spatial (GVD) suivant l'approximation analytique.
+**[Modèle et méthode]** Propagation spatio-temporelle d'un paquet gaussien par FFT. Propagation spectrale exacte dans le modèle discret considéré.
+**[Vérifié numériquement]** Validation stricte sur 4 critères (conservation de la norme, conservation de l'énergie, vitesse du centroïde, étalement GVD).
 **[Limites]** Centroïde linéaire valide uniquement sans traversée de la coupure périodique (vérifié par test de probabilité aux bords). Approx. des ondes de spin non-interagissantes.
 
 ---
@@ -77,7 +73,8 @@ Les scripts sont organisés par domaine de recherche :
 
 Ce dépôt intègre des critères de validation pour distinguer les prototypes exploratoires des moteurs ayant passé un protocole de test. Chaque script documente ses invariants (ex : conservation de l'énergie ou de la norme) et ses tests de symétrie. Les paramètres de référence et les seuils de validation (ex : tolérances d'assertion) sont fixés dans le code pour garantir la reproductibilité des simulations.
 
-> **Note de développement :** Un registre de validation transversal est en cours de structuration pour centraliser le statut, les tests et les limites de chaque module.
+> **⚠️ Note de transparence (Audit en cours) :** 
+> La documentation ci-dessus reflète l'architecture et les intentions des scripts. Un audit croisé (Code vs README) est en cours pour s'assurer que chaque affirmation (mécanismes T1/T2, estimateurs Monte Carlo, conditions aux limites) correspond exactement à l'implémentation actuelle dans les fichiers `.py`. En cas de divergence, le code fait foi.
 
 ---
 
@@ -85,11 +82,12 @@ Ce dépôt intègre des critères de validation pour distinguer les prototypes e
 
 | Niveau | Signification |
 |---|---|
-| **[Démontré]** | Propriété mathématique ou test reproductible du code |
-| **[Modèle et méthode]** | Algorithme exact pour un modèle physique donné, sans prétendre à l'exactitude du modèle réel |
-| **[Observé numériquement]** | Résultat obtenu pour un jeu de paramètres et une grille donnés |
-| **[Hypothèse]** | Piste physique, extension ou interprétation non encore validée |
-| **[Limite]** | Restriction explicite de la portée d’un résultat ou d’un test |
+| **[Démontré analytiquement]** | Propriété établie par dérivation mathématique |
+| **[Vérifié numériquement]** | Propriété confirmée par des tests reproductibles |
+| **[Modèle et méthode]** | Méthode définie pour un modèle physique donné |
+| **[Observé numériquement]** | Résultat obtenu pour des paramètres et une discrétisation donnés |
+| **[Hypothèse]** | Piste physique ou interprétation non validée |
+| **[Limite]** | Restriction explicite de la portée d'un résultat |
 
 ---
 *Développé sur Termux et VS Code. Architecture et validation scientifique itératives.*
