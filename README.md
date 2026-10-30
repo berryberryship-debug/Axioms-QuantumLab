@@ -43,7 +43,7 @@ Les scripts sont organisés par domaine de recherche :
 *   `v101_magnon_packet.py` : Simulation dynamique spatio-temporelle d'un paquet d'ondes de spin via Transformée de Fourier Rapide (FFT). *Méthode : propagation spectrale exacte dans le modèle discret considéré.*
 
 ### 4. HPC & Systèmes Quantiques Ouverts
-*   `moteur_ste50.py` : Moteur HPC (Numba) couplant hystérésis macroscopique et dynamique quantique. *Méthode : résolution par trajectoires quantiques (quantum trajectories / Monte Carlo wave-function) pour l'équation maîtresse de Lindblad via un estimateur de moyenne sur trajectoires parallélisées.* **(Génère des rapports DOCX)**.
+*   `moteur_ste50.py` : Moteur HPC (Numba) couplant hystérésis macroscopique et dynamique quantique. *Méthode : intégration directe de l'équation maîtresse de Lindblad par Runge-Kutta d'ordre 4 (RK4) sur la matrice de densité, parallélisée sur un ensemble de conditions initiales via Numba.* **(Génère des rapports DOCX)**.
 
 ### 5. Fondements & Formalismes Alternatifs
 *   `bohm_hydro_mapping.py` : Exploration de la mécanique quantique de de Broglie-Bohm (interprétation hydrodynamique).
@@ -73,8 +73,7 @@ Les scripts sont organisés par domaine de recherche :
 
 Ce dépôt intègre des critères de validation pour distinguer les prototypes exploratoires des moteurs ayant passé un protocole de test. Chaque script documente ses invariants (ex : conservation de l'énergie ou de la norme) et ses tests de symétrie. Les paramètres de référence et les seuils de validation (ex : tolérances d'assertion) sont fixés dans le code pour garantir la reproductibilité des simulations.
 
-> **⚠️ Note de transparence (Audit en cours) :** 
-> La documentation ci-dessus reflète l'architecture et les intentions des scripts. Un audit croisé (Code vs README) est en cours pour s'assurer que chaque affirmation (mécanismes T1/T2, estimateurs Monte Carlo, conditions aux limites) correspond exactement à l'implémentation actuelle dans les fichiers `.py`. En cas de divergence, le code fait foi.
+> **✅ Note de validation :** Un audit croisé du code et de la documentation a été effectué. Les descriptions des modules `fluxonium_psi.py`, `v101_magnon_packet.py` et des scripts V99/V100 ont été vérifiées conformes aux implémentations. Une correction a été apportée sur la méthode numérique du moteur STE-50 (intégration RK4 directe plutôt que trajectoires quantiques).
 
 ---
 
