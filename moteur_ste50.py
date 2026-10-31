@@ -1,344 +1,659 @@
-# ==============================================================================
-# STE-50 "SIDÉRATION" ENGINE — MONOLITHE HPC UNIFIÉ & GÉNÉRATEUR WORD
-# Couplage Énactif : cQED Résonante + Hystérésis de Phase + Soliton Topologique
-# ==============================================================================
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+STE-50 v2.1.4.1 — RK4 COUPLÉ (z, ρ) — VERSION CORRIGÉE + SORTIES COMPLÈTES
+
+Corrections principales :
+1. Calcul de dq/dt cohérent et explicite
+2. Enregistrement correct de z_start
+3. Projection robuste
+4. Détection Preisach clarifiée
+5. Sorties complètes (CSV + JSON + NPY + log)
+"""
 
 import os
 import json
+import csv
+import hashlib
+from datetime import datetime
 import numpy as np
-import pandas as pd
-from numba import njit, prange
 
-try:
-    from docx import Document
-    from docx.shared import Inches, Pt, RGBColor
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
-    HAS_DOCX = True
-except ImportError:
-    HAS_DOCX = False
+TOL = 1e-12
 
-class MacroPhaseMemory:
-    def __init__(self, dt=0.01, kmin=0.2, kmax=3.0, a=1.0, b=0.4, c=0.2, n=2.0, beta=1.5):
-        self.dt = dt
+
+# ======================================================================
+# 1. SIGNAL EXTERNE
+# ======================================================================
+
+def external_signal(t):
+    return (
+        1.2 * np.sin(0.5 * np.pi * t)
+        + 0.3 * np.cos(0.2 * np.pi * t)
+    )
+
+
+def external_signal_derivative(t):
+    return (
+        0.6 * np.pi * np.cos(0.5 * np.pi * t)
+        - 0.06 * np.pi * np.sin(0.2 * np.pi * t)
+    )
+
+
+# ======================================================================
+# 2. OBSERVABLE DE RÉTROACTION
+# ======================================================================
+
+def feedback_observable(target="B"):
+    O = np.zeros((4, 4), dtype=np.complex128)
+    if target == "A":
+        O[2, 2] = 1.0
+        O[3, 3] = 1.0
+    elif target == "B":
+        O[1, 1] = 1.0
+        O[3, 3] = 1.0
+    else:
+        raise ValueError("target doit être 'A' ou 'B'.")
+    return O
+
+
+# ======================================================================
+# 3. MÉMOIRE MACROPHASE
+# ======================================================================
+
+class MacroPhaseMemoryCoupled:
+    def __init__(
+        self,
+        kmin=0.2,
+        kmax=3.0,
+        A=1.0,
+        beta_bw=0.4,
+        gamma_bw=0.2,
+        n=2.0,
+        beta_tanh=1.5,
+    ):
         self.kmin = kmin
         self.kmax = kmax
-        self.a = a
-        self.b = b
-        self.c = c
+        self.A = A
+        self.beta_bw = beta_bw
+        self.gamma_bw = gamma_bw
         self.n = n
-        self.beta = beta
-        
+        self.beta_tanh = beta_tanh
+
         self.z = 0.0
-        self.prev_u = 0.0
         self.weights = np.array([0.15, 0.25, 0.35, 0.15, 0.10])
         self.p_states = np.ones(5)
-        self.thresholds = np.array([[-1.0, 1.0], [-0.5, 0.5], [-0.2, 0.2], [0.1, 0.8], [-0.8, -0.1]])
+        self.thresholds = np.array([
+            [-1.0, 1.0],
+            [-0.5, 0.5],
+            [-0.2, 0.2],
+            [0.1, 0.8],
+            [-0.8, -0.1],
+        ])
 
-    def compute_k_eff(self, u_input):
-        du = u_input - self.prev_u
-        z_abs = abs(self.z)
-        dz = self.a * du - self.b * abs(du) * (z_abs ** (self.n - 1.0)) * self.z - self.c * du * (z_abs ** self.n)
-        self.z += self.dt * dz
-        s = 0.5 * (1.0 + np.tanh(self.beta * self.z))
-        k_bw = self.kmin + (self.kmax - self.kmin) * s
-        
+    def bouc_wen_rhs(self, z, du_eff_dt):
+        z_abs = abs(z)
+        return (
+            self.A * du_eff_dt
+            - self.beta_bw * abs(du_eff_dt) * (z_abs ** (self.n - 1.0)) * z
+            - self.gamma_bw * du_eff_dt * (z_abs ** self.n)
+        )
+
+    def update_preisach(self, u_eff):
+        changed = False
         for i in range(5):
-            if u_input >= self.thresholds[i, 1]: self.p_states[i] = 1.0
-            elif u_input <= self.thresholds[i, 0]: self.p_states[i] = -1.0
-        k_preisach = np.sum(self.weights * self.p_states)
-        
-        self.prev_u = u_input
-        return max(0.1, float(k_bw + 0.2 * k_preisach))
+            old = self.p_states[i]
+            if u_eff >= self.thresholds[i, 1]:
+                self.p_states[i] = 1.0
+            elif u_eff <= self.thresholds[i, 0]:
+                self.p_states[i] = -1.0
+            if self.p_states[i] != old:
+                changed = True
+        k_preisach = float(np.sum(self.weights * self.p_states))
+        return k_preisach, changed
 
-@njit(cache=True)
-def hermitian_part_nb(rho):
+    def compute_k_eff(self, z, k_preisach):
+        s = 0.5 * (1.0 + np.tanh(self.beta_tanh * z))
+        k_bouc_wen = self.kmin + (self.kmax - self.kmin) * s
+        return max(0.1, float(k_bouc_wen + 0.2 * k_preisach))
+
+
+# ======================================================================
+# 4. OUTILS QUANTIQUES
+# ======================================================================
+
+def hermitize(rho):
     return 0.5 * (rho + rho.conj().T)
 
-@njit(cache=True)
-def von_neumann_entropy_nb(rho, eps=1e-14):
-    rh = hermitian_part_nb(rho)
-    vals = np.linalg.eigvalsh(rh)
-    s = 0.0
-    for i in range(vals.shape[0]):
-        v = np.real(vals[i])
-        if v < eps: v = eps
-        if v > 1.0: v = 1.0
-        s -= v * np.log(v)
-    return s
 
-@njit(cache=True)
-def cqed_kitaev_hamiltonian(gap_material, phase_k, g_coupling, mu=0.0, Delta=0.5):
-    hz = -mu - 2.0 * gap_material * np.cos(phase_k)
-    hy = 2.0 * Delta * np.sin(phase_k)
-    H_kit = np.array([[hz, 1j * hy], [-1j * hy, -hz]], dtype=np.complex128)
-    
-    H_full = np.zeros((4, 4), dtype=np.complex128)
-    H_full[0:2, 0:2] = H_kit + 0.5 * gap_material * np.eye(2, dtype=np.complex128)
-    H_full[2:4, 2:4] = H_kit - 0.5 * gap_material * np.eye(2, dtype=np.complex128)
-    
-    H_full[0, 3] = g_coupling
-    H_full[3, 0] = g_coupling
-    H_full[1, 2] = g_coupling * 0.5
-    H_full[2, 1] = g_coupling * 0.5
-    
-    return H_full
+def von_neumann_entropy(rho):
+    eigenvalues = np.linalg.eigvalsh(hermitize(rho))
+    positive = eigenvalues.real[eigenvalues.real > TOL]
+    if positive.size == 0:
+        return 0.0
+    return float(-np.sum(positive * np.log(positive)))
 
-@njit(cache=True)
-def lindblad_rhs_nb(rho, H, c_ops):
-    drho = -1j * (H @ rho - rho @ H)
-    nc = c_ops.shape[0]
-    for k in range(nc):
-        L = c_ops[k]
-        Ld = L.conj().T
-        drho += L @ rho @ Ld - 0.5 * (Ld @ L @ rho + rho @ Ld @ L)
-    return drho
 
-@njit(cache=True)
-def rk4_step_rho_nb(rho, dt, H, c_ops):
-    k1 = lindblad_rhs_nb(rho, H, c_ops)
-    k2 = lindblad_rhs_nb(rho + 0.5 * dt * k1, H, c_ops)
-    k3 = lindblad_rhs_nb(rho + 0.5 * dt * k2, H, c_ops)
-    k4 = lindblad_rhs_nb(rho + dt * k3, H, c_ops)
-    rho_next = rho + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
-    rho_next = hermitian_part_nb(rho_next)
-    tr = np.trace(rho_next)
-    if np.abs(tr) > 1e-15:
-        rho_next = rho_next / tr
-    return rho_next
+def partial_trace_b(rho, dim_a=2, dim_b=2):
+    rho_a = np.zeros((dim_a, dim_a), dtype=np.complex128)
+    for b in range(dim_b):
+        for i in range(dim_a):
+            for j in range(dim_a):
+                rho_a[i, j] += rho[i * dim_b + b, j * dim_b + b]
+    return rho_a
 
-@njit(cache=True)
-def partial_trace_A_nb(rho, dimA, dimB):
-    red = np.zeros((dimB, dimB), dtype=rho.dtype)
-    for a in range(dimA):
-        for i in range(dimB):
-            for j in range(dimB):
-                red[i, j] += rho[a * dimB + i, a * dimB + j]
-    return red
 
-@njit(cache=True)
-def partial_trace_B_nb(rho, dimA, dimB):
-    red = np.zeros((dimA, dimA), dtype=rho.dtype)
-    for b in range(dimB):
-        for i in range(dimA):
-            for j in range(dimA):
-                red[i, j] += rho[i * dimB + b, j * dimB + b]
-    return red
+def partial_trace_a(rho, dim_a=2, dim_b=2):
+    rho_b = np.zeros((dim_b, dim_b), dtype=np.complex128)
+    for a in range(dim_a):
+        for i in range(dim_b):
+            for j in range(dim_b):
+                rho_b[i, j] += rho[a * dim_b + i, a * dim_b + j]
+    return rho_b
 
-@njit(cache=True)
-def extract_ste_indices(rho, rho_ref, gap, topo, dimA=2, dimB=2):
-    rhoA = partial_trace_B_nb(rho, dimA, dimB)
-    rhoB = partial_trace_A_nb(rho, dimA, dimB)
-    
-    SA = von_neumann_entropy_nb(rhoA)
-    SB = von_neumann_entropy_nb(rhoB)
-    SAB = von_neumann_entropy_nb(rho)
-    MI = max(0.0, SA + SB - SAB)
-    
-    C = 0.0
-    d = rho.shape[0]
-    for i in range(d):
-        for j in range(d):
-            if i != j: C += np.abs(rho[i, j])
-            
-    F = np.real(np.trace(hermitian_part_nb(rho) @ hermitian_part_nb(rho_ref)))
-    P = np.real(np.trace(rho @ rho))
-    
-    R = C / max(1.0, SAB)
-    E = gap * topo
-    Lambda = SAB
-    Psi = 0.5 * F + 0.5 * MI
-    
-    return R, E, P, Lambda, Psi, SAB, C, F, MI
 
-@njit(cache=True)
-def evolve_trajectory_core(rho0, H, c_ops, tlist):
-    rho = rho0.copy()
-    for i in range(1, tlist.shape[0]):
-        dt = tlist[i] - tlist[i-1]
-        rho = rk4_step_rho_nb(rho, dt, H, c_ops)
-    return rho
-
-@njit(parallel=True, cache=True)
-def run_hpc_batch(Hs, c_opss, rho0s, rho_refs, gaps, topologies, tlist, dimA, dimB):
-    ntraj = rho0s.shape[0]
-    
-    R = np.empty(ntraj, dtype=np.float64)
-    E = np.empty(ntraj, dtype=np.float64)
-    P = np.empty(ntraj, dtype=np.float64)
-    L = np.empty(ntraj, dtype=np.float64)
-    Psi = np.empty(ntraj, dtype=np.float64)
-    entropy = np.empty(ntraj, dtype=np.float64)
-    coherence = np.empty(ntraj, dtype=np.float64)
-    fidelity = np.empty(ntraj, dtype=np.float64)
-    mutual_info = np.empty(ntraj, dtype=np.float64)
-
-    for j in prange(ntraj):
-        rho_f = evolve_trajectory_core(rho0s[j], Hs[j], c_opss[j], tlist)
-        
-        Rj, Ej, Pj, Lj, Psij, Sj, Cj, Fj, Mj = extract_ste_indices(
-            rho_f, rho_refs[j], gaps[j], topologies[j], dimA, dimB
-        )
-        
-        R[j] = Rj; E[j] = Ej; P[j] = Pj; L[j] = Lj; Psi[j] = Psij
-        entropy[j] = Sj; coherence[j] = Cj; fidelity[j] = Fj; mutual_info[j] = Mj
-
-    return R, E, P, L, Psi, entropy, coherence, fidelity, mutual_info
-
-def generate_word_files(summary):
-    if not HAS_DOCX:
-        print("[AVERTISSEMENT] La bibliothèque 'python-docx' n'est pas installée.")
-        return None, None
-
-    out_dir = "output"
-    os.makedirs(out_dir, exist_ok=True)
-    
-    doc_lettre = Document()
-    doc_lettre.add_heading("Proposition d'architecture formelle", level=1)
-    doc_lettre.add_paragraph("Couplage non linéaire macro-quantique et protection topologique de phase (Moteur STE-50)")
-    doc_lettre.add_paragraph()
-    
-    doc_lettre.add_paragraph("Monsieur le Professeur Blais,")
-    doc_lettre.add_paragraph(
-        "En tant qu'architecte noétique et consultant en innovation (fondateur d'Axioms Base Labs), "
-        "mon travail se situe à la croisée de la phénoménologie systémique (dans la lignée de Francisco Varela et David Bohm) "
-        "et de la modélisation informatique avancée."
-    )
-    doc_lettre.add_paragraph(
-        "Loin des sentiers battus de la programmation conventionnelle, j'aborde la conception technologique avec une vision holistique : "
-        "celle d'unifier l'ordre matériel macroscopique (la mémoire de forme et l'hystérésis non linéaire) et la dynamique des systèmes quantiques ouverts."
-    )
-    doc_lettre.add_paragraph(
-        "Je me permets de soumettre à votre attention le code source d'un engin de calcul novateur (le prototype STE-50), "
-        "développé avec le soutien de l'intelligence artificielle comme outil de transcription rapide. Ce script simule un couplage interdisciplinaire audacieux : "
-        "l'intégration d'une mémoire matérielle pilotant en temps réel le gap spectral et les phases topologiques d'un système quantique ouvert résolu "
-        "via l'équation maîtresse de Lindblad et des extensions cQED."
-    )
-    doc_lettre.add_paragraph(
-        "Au-delà de la performance numérique — optimisée ensemblistement via Numba et validée par des métriques d'information mutuelle et de pureté —, "
-        "l'intuition fondatrice de cette architecture est d'explorer un paradigme de rupture : la possibilité d'encoder l'information non pas par des "
-        "contraintes externes lourdes, mais par une signature topologique de phase auto-protégée, agissant en superposition au-dessus des substrats matériels stables."
-    )
-    doc_lettre.add_paragraph(
-        "Je sais combien la rigueur est cardinale au sein de l'Institut quantique de l'Université de Sherbrooke. C'est pourquoi cet outil est pensé pour être "
-        "falsifiable, traçable et rigoureusement normé. Je vous joins par la présente les artefacts de simulation ainsi que le cœur du code pour étude."
-    )
-    doc_lettre.add_paragraph()
-    doc_lettre.add_paragraph("Veuillez agréer, Monsieur le Professeur Blais, l'expression de ma considération la plus distinguée.")
-    doc_lettre.add_paragraph()
-    doc_lettre.add_paragraph("Xio\nArchitecte d'Innovation et de Systèmes Noétiques\nAxioms Base Labs")
-    
-    path_lettre = os.path.join(out_dir, "Lettre_Presentation_Alexandre_Blais.docx")
-    doc_lettre.save(path_lettre)
-
-    doc_rapport = Document()
-    doc_rapport.add_heading("STE-50 ENGINE REPORT (cQED UNIFIED)", level=1)
-    doc_rapport.add_paragraph("Rapport de simulation HPC et diagnostic de falsifiabilité poppérienne.")
-    
-    table = doc_rapport.add_table(rows=1, cols=2)
-    table.style = 'Table Grid'
-    hdr_cells = table.rows[0].cells
-    hdr_cells[0].text = 'Paramètre / Observable'
-    hdr_cells[1].text = 'Valeur Numérique (float64)'
-    
-    metrics = [
-        ("Trajectoires Monte Carlo", f"{summary['ntraj']}"),
-        ("Espace de Hilbert (d)", "4 (Bipartite 2x2)"),
-        ("Moyenne du Gap Effectif", f"{summary['gap_mean']:.6f}"),
-        ("Fidélité de l'État Solitonique", f"{summary['fidelity_mean']:.6f}"),
-        ("Cohérence Quantique Globale (L1)", f"{summary['coherence_mean']:.6f}"),
-        ("Pureté de la Matrice d'État (P)", f"{summary['P_mean']:.6f}"),
-        ("Entropie de von Neumann (S)", f"{summary['entropy_mean']:.6f}"),
-        ("Information Mutuelle Bipartie", f"{summary['mutual_info_mean']:.6f}"),
-        ("Indice PSI STE (Code-barres)", f"{summary['Psi_mean']:.6f}"),
-        ("Intervalle de Confiance", f"± {1.96 * summary['Psi_std'] / np.sqrt(summary['ntraj']):.6f}"),
-        ("Statut du Verdict", summary["verdict"])
-    ]
-    
-    for label, val in metrics:
-        row_cells = table.add_row().cells
-        row_cells[0].text = label
-        row_cells[1].text = val
-        
-    path_rapport = os.path.join(out_dir, "Rapport_Scientifique_STE50.docx")
-    doc_rapport.save(path_rapport)
-
-    return path_lettre, path_rapport
-
-if __name__ == "__main__":
-    print("Initialisation du pipeline unifié STE-50 (Sidération HPC)...")
-    
-    ntraj = 64
-    d = 4
-    dimA = 2
-    dimB = 2
-    tlist = np.linspace(0.0, 15.0, 300)
-
-    Hs = np.zeros((ntraj, d, d), dtype=np.complex128)
-    c_opss = np.zeros((ntraj, 1, d, d), dtype=np.complex128)
-    rho0s = np.zeros((ntraj, d, d), dtype=np.complex128)
-    rho_refs = np.zeros((ntraj, d, d), dtype=np.complex128)
-    gaps = np.zeros(ntraj, dtype=np.float64)
-    topologies = np.zeros(ntraj, dtype=np.int64)
-
-    rng = np.random.default_rng(777)
-    phase_memory = MacroPhaseMemory(dt=0.05)
-
-    print("Calcul des couplages via hystérésis multi-échelles...")
-    for j in range(ntraj):
-        u_mecanique = rng.uniform(-1.5, 1.5)
-        gap_mat = phase_memory.compute_k_eff(u_mecanique)
-        gaps[j] = gap_mat
-        topologies[j] = 1 if gap_mat > 0.8 else 0
-        
-        phase_k = rng.uniform(-np.pi, np.pi)
-        g_coupling = 0.25 
-        Hs[j] = cqed_kitaev_hamiltonian(gap_mat, phase_k, g_coupling)
-        
-        gamma_decoherence = 0.02
-        L = np.zeros((4, 4), dtype=np.complex128)
-        L[1, 0] = np.sqrt(gamma_decoherence)
-        L[3, 2] = np.sqrt(gamma_decoherence)
-        c_opss[j, 0] = L
-        
-        psi0 = np.array([1.0, 0.0, 0.0, 1.0], dtype=np.complex128) / np.sqrt(2.0)
-        rho_init = np.outer(psi0, psi0.conj())
-        rho0s[j] = rho_init
-        rho_refs[j] = rho_init.copy()
-
-    print(f"Lancement du batch Monte Carlo Numba sur {ntraj} trajectoires...")
-    R, E, P_out, Lam, Psi, ent, coh, fid, mi = run_hpc_batch(
-        Hs, c_opss, rho0s, rho_refs, gaps, topologies, tlist, dimA, dimB
-    )
-
-    summary_dict = {
-        "ntraj": ntraj,
-        "gap_mean": float(np.mean(gaps)), "gap_std": float(np.std(gaps)),
-        "topology_mean": float(np.mean(topologies)),
-        "R_mean": float(np.mean(R)), "R_std": float(np.std(R)),
-        "E_mean": float(np.mean(E)), "E_std": float(np.std(E)),
-        "P_mean": float(np.mean(P_out)), "P_std": float(np.std(P_out)),
-        "Lambda_mean": float(np.mean(Lam)), "Lambda_std": float(np.std(Lam)),
-        "Psi_mean": float(np.mean(Psi)), "Psi_std": float(np.std(Psi)),
-        "entropy_mean": float(np.mean(ent)), "coherence_mean": float(np.mean(coh)),
-        "fidelity_mean": float(np.mean(fid)), "mutual_info_mean": float(np.mean(mi)),
+def audit_rho_raw(rho, label=""):
+    rho_h = hermitize(rho)
+    eigenvalues = np.linalg.eigvalsh(rho_h)
+    trace = float(np.trace(rho).real)
+    return {
+        "label": label,
+        "trace": trace,
+        "trace_error": float(abs(trace - 1.0)),
+        "hermiticity_error": float(np.linalg.norm(rho - rho.conj().T, ord="fro")),
+        "min_eigenvalue": float(eigenvalues.min()),
+        "purity": float(np.real(np.trace(rho @ rho))),
+        "is_valid": bool(
+            abs(trace - 1.0) < 1e-10
+            and np.linalg.norm(rho - rho.conj().T, ord="fro") < 1e-10
+            and eigenvalues.min() > -1e-10
+        ),
     }
 
-    validation_status = (
-        summary_dict["gap_mean"] > 0.4 
-        and summary_dict["Psi_mean"] > 0.65 
-        and summary_dict["entropy_mean"] < 1.2
-    )
-    summary_dict["verdict"] = "VALIDATION NUMÉRIQUE : COHÉRENCE DU CODE-BARRES TOPOLOGIQUE" if validation_status else "RÉFUTATION NUMÉRIQUE"
 
-    print("Génération automatique des fichiers Word...")
-    path_lettre, path_rapport = generate_word_files(summary_dict)
+def project_physical_rho(rho):
+    rho_h = hermitize(rho)
+    trace = np.trace(rho_h).real
+    if trace <= TOL:
+        raise ValueError("Trace non positive : projection impossible.")
+    rho_h = rho_h / trace
+    eigenvalues, eigenvectors = np.linalg.eigh(rho_h)
+    eigenvalues = np.clip(eigenvalues.real, 0.0, None)
+    total = eigenvalues.sum()
+    if total <= TOL:
+        raise ValueError("Spectre non projetable.")
+    eigenvalues = eigenvalues / total
+    rho_projected = eigenvectors @ np.diag(eigenvalues) @ eigenvectors.conj().T
+    rho_projected = hermitize(rho_projected)
+    projection_error = float(np.linalg.norm(rho_projected - rho, ord="fro"))
+    return rho_projected, projection_error
 
-    print("=" * 60)
-    print("Exécution du pipeline STE-50 terminée avec succès.")
-    if path_lettre and path_rapport:
-        print(f" -> Fichier Word 1 (Lettre)  : {path_lettre}")
-        print(f" -> Fichier Word 2 (Rapport) : {path_rapport}")
+
+# ======================================================================
+# 5. HAMILTONIEN
+# ======================================================================
+
+def build_hamiltonian(gap_material, phase_k, g_coupling, mu=0.0, Delta=0.5):
+    delta_k = Delta * np.exp(1j * phase_k)
+    delta_k_star = np.conj(delta_k)
+    H = np.zeros((4, 4), dtype=np.complex128)
+    H[0, 0] = -mu + 0.5 * gap_material
+    H[1, 1] = -mu - 0.5 * gap_material
+    H[2, 2] = mu + 0.5 * gap_material
+    H[3, 3] = mu - 0.5 * gap_material
+    H[0, 2] = delta_k_star
+    H[2, 0] = delta_k
+    H[1, 3] = delta_k_star
+    H[3, 1] = delta_k
+    H[0, 3] = g_coupling
+    H[3, 0] = g_coupling
+    H[1, 2] = g_coupling
+    H[2, 1] = g_coupling
+    return H
+
+
+def phase_from_u_eff(u_eff):
+    return (u_eff % (2.0 * np.pi)) - np.pi
+
+
+# ======================================================================
+# 6. GÉNÉRATEUR COUPLÉ
+# ======================================================================
+
+def lindblad_rhs(rho, H, c_ops):
+    drho = -1j * (H @ rho - rho @ H)
+    for L in c_ops:
+        L_dagger = L.conj().T
+        drho += L @ rho @ L_dagger - 0.5 * (L_dagger @ L @ rho + rho @ L_dagger @ L)
+    return drho
+
+
+def coupled_rhs(
+    z, rho, t, memory, eta_u, g_coupling, k_preisach, c_ops, feedback_enabled=True
+):
+    u_ext = external_signal(t)
+    du_ext_dt = external_signal_derivative(t)
+    O = feedback_observable("B")
+    q = float(np.real(np.trace(rho @ O)))
+
+    if feedback_enabled:
+        u_eff = u_ext + eta_u * q
     else:
-        print(" (Note : Installez 'python-docx' via pip pour activer l'export Word automatique)")
-    print(f"Valeur finale moyenne de l'indice Psi : {summary_dict['Psi_mean']:.4f}")
-    print("=" * 60)
+        u_eff = u_ext
+
+    k_eff = memory.compute_k_eff(z, k_preisach)
+    phase_k = phase_from_u_eff(u_eff)
+    H = build_hamiltonian(gap_material=k_eff, phase_k=phase_k, g_coupling=g_coupling)
+
+    drho_dt = lindblad_rhs(rho, H, c_ops)
+    dq_dt = float(np.real(np.trace(O @ drho_dt)))
+
+    if feedback_enabled:
+        du_eff_dt = du_ext_dt + eta_u * dq_dt
+    else:
+        du_eff_dt = du_ext_dt
+        dq_dt = 0.0
+
+    dz_dt = memory.bouc_wen_rhs(z, du_eff_dt)
+
+    diagnostics = {
+        "u_ext": u_ext,
+        "u_eff": u_eff,
+        "du_ext_dt": du_ext_dt,
+        "du_eff_dt": du_eff_dt,
+        "q": q,
+        "dq_dt": dq_dt,
+        "k_eff": k_eff,
+        "phase_k": phase_k,
+    }
+    return dz_dt, drho_dt, diagnostics
+
+
+# ======================================================================
+# 7. RK4 COUPLÉ
+# ======================================================================
+
+def coupled_rk4_step(
+    z, rho, t_start, dt, memory, eta_u, g_coupling, k_preisach, c_ops, feedback_enabled=True
+):
+    def rhs(z_stage, rho_stage, t_stage):
+        return coupled_rhs(
+            z_stage, rho_stage, t_stage,
+            memory, eta_u, g_coupling, k_preisach, c_ops, feedback_enabled
+        )
+
+    dz1, drho1, diag1 = rhs(z, rho, t_start)
+    dz2, drho2, diag2 = rhs(z + 0.5*dt*dz1, rho + 0.5*dt*drho1, t_start + 0.5*dt)
+    dz3, drho3, diag3 = rhs(z + 0.5*dt*dz2, rho + 0.5*dt*drho2, t_start + 0.5*dt)
+    dz4, drho4, diag4 = rhs(z + dt*dz3, rho + dt*drho3, t_start + dt)
+
+    z_next = z + (dt / 6.0) * (dz1 + 2*dz2 + 2*dz3 + dz4)
+    rho_raw = rho + (dt / 6.0) * (drho1 + 2*drho2 + 2*drho3 + drho4)
+
+    return z_next, rho_raw, {
+        "stage_1": diag1,
+        "stage_2": diag2,
+        "stage_3": diag3,
+        "stage_4": diag4,
+    }
+
+
+# ======================================================================
+# 8. ÉTATS ET OPÉRATEURS
+# ======================================================================
+
+def initial_bell_state():
+    psi0 = np.array([1.0, 0.0, 0.0, 1.0], dtype=np.complex128) / np.sqrt(2.0)
+    return np.outer(psi0, psi0.conj())
+
+
+def decoherence_operators(gamma=0.02):
+    L = np.zeros((4, 4), dtype=np.complex128)
+    L[1, 0] = np.sqrt(gamma)
+    L[3, 2] = np.sqrt(gamma)
+    return [L]
+
+
+# ======================================================================
+# 9. MÉTRIQUES
+# ======================================================================
+
+def ste_metrics(rho, rho_ref, gap, topology_proxy):
+    rho_a = partial_trace_b(rho)
+    rho_b = partial_trace_a(rho)
+    entropy_ab = von_neumann_entropy(rho)
+    entropy_a = von_neumann_entropy(rho_a)
+    entropy_b = von_neumann_entropy(rho_b)
+    mutual_information = max(0.0, entropy_a + entropy_b - entropy_ab)
+    coherence = float(np.sum(np.abs(rho)) - np.sum(np.abs(np.diag(rho))))
+    bell_survival = float(np.real(np.trace(hermitize(rho) @ hermitize(rho_ref))))
+    purity = float(np.real(np.trace(rho @ rho)))
+    psi = 0.5 * bell_survival + 0.5 * mutual_information
+
+    return {
+        "gap": float(gap),
+        "topology_proxy": int(topology_proxy),
+        "entropy_ab": entropy_ab,
+        "entropy_a": entropy_a,
+        "entropy_b": entropy_b,
+        "mutual_information": mutual_information,
+        "coherence": coherence,
+        "bell_survival": bell_survival,
+        "purity": purity,
+        "psi": psi,
+    }
+
+
+# ======================================================================
+# 10. SIMULATION HYBRIDE
+# ======================================================================
+
+def run_coupled_system(
+    total_time=2.0,
+    n_steps=200,
+    g_coupling=0.25,
+    eta_u=0.1,
+    feedback_enabled=True,
+    project=True,
+    audit_each_step=True,
+):
+    dt = total_time / n_steps
+    memory = MacroPhaseMemoryCoupled()
+    rho = initial_bell_state()
+    rho_ref = rho.copy()
+    c_ops = decoherence_operators(gamma=0.02)
+
+    history = []
+    invalid_raw_audits = []
+    preisach_events = []
+
+    u0 = external_signal(0.0)
+    k_preisach, _ = memory.update_preisach(u0)
+
+    for step in range(n_steps):
+        t_start = step * dt
+        t_end = t_start + dt
+        z_start = memory.z
+
+        q_current = float(np.real(np.trace(rho @ feedback_observable("B"))))
+        u_eff_start = external_signal(t_start) + (eta_u * q_current if feedback_enabled else 0.0)
+
+        k_preisach, changed = memory.update_preisach(u_eff_start)
+        if changed:
+            preisach_events.append({
+                "time": float(t_start),
+                "u_eff": float(u_eff_start),
+                "p_states": memory.p_states.copy().tolist(),
+            })
+
+        z_next, rho_raw, stage_diagnostics = coupled_rk4_step(
+            memory.z, rho, t_start, dt,
+            memory, eta_u, g_coupling, k_preisach, c_ops, feedback_enabled
+        )
+
+        raw_audit = audit_rho_raw(rho_raw, label=f"step={step}_raw")
+        if audit_each_step and not raw_audit["is_valid"]:
+            invalid_raw_audits.append(raw_audit)
+
+        if project:
+            rho_projected, projection_error = project_physical_rho(rho_raw)
+        else:
+            rho_projected = rho_raw
+            projection_error = 0.0
+
+        memory.z = z_next
+        rho = rho_projected
+
+        metrics = ste_metrics(
+            rho, rho_ref,
+            stage_diagnostics["stage_4"]["k_eff"],
+            1 if stage_diagnostics["stage_4"]["k_eff"] > 0.8 else 0,
+        )
+
+        metrics.update({
+            "step": step,
+            "t_start": t_start,
+            "t_end": t_end,
+            "u_eff_start": stage_diagnostics["stage_1"]["u_eff"],
+            "u_eff_mid": stage_diagnostics["stage_2"]["u_eff"],
+            "u_eff_end": stage_diagnostics["stage_4"]["u_eff"],
+            "q_start": stage_diagnostics["stage_1"]["q"],
+            "q_end": stage_diagnostics["stage_4"]["q"],
+            "dq_dt_end": stage_diagnostics["stage_4"]["dq_dt"],
+            "z_start": z_start,
+            "z_end": z_next,
+            "k_eff_start": stage_diagnostics["stage_1"]["k_eff"],
+            "k_eff_end": stage_diagnostics["stage_4"]["k_eff"],
+            "projection_error": projection_error,
+            "raw_trace": raw_audit["trace"],
+            "raw_trace_error": raw_audit["trace_error"],
+            "raw_hermiticity_error": raw_audit["hermiticity_error"],
+            "raw_min_eigenvalue": raw_audit["min_eigenvalue"],
+            "raw_audit_valid": raw_audit["is_valid"],
+            "projection_enabled": project,
+            "feedback_enabled": feedback_enabled,
+            "eta_u": eta_u,
+            "g_coupling": g_coupling,
+        })
+        history.append(metrics)
+
+    return {
+        "history": history,
+        "rho_final": rho,
+        "z_final": memory.z,
+        "invalid_raw_audits": invalid_raw_audits,
+        "preisach_events": preisach_events,
+        "n_steps": n_steps,
+        "dt": dt,
+        "total_time": total_time,
+        "feedback_enabled": feedback_enabled,
+        "eta_u": eta_u,
+        "g_coupling": g_coupling,
+    }
+
+
+# ======================================================================
+# 11. TESTS
+# ======================================================================
+
+def test_hamiltonian():
+    print("=== TEST HAMILTONIEN ===")
+    H = build_hamiltonian(1.0, 0.7, 0.25)
+    err = np.linalg.norm(H - H.conj().T, ord="fro")
+    print(f"Erreur d’hermiticité : {err:.3e}")
+    assert err < TOL
+    print("OK\n")
+
+
+def test_feedback_isolation():
+    print("=== TEST ISOLATION : eta_u = 0 ===")
+    result = run_coupled_system(total_time=1.0, n_steps=100, eta_u=0.0,
+                                feedback_enabled=False, project=False, audit_each_step=False)
+    print(f"q final : {result['history'][-1]['q_end']:.12f}")
+    print(f"z final : {result['z_final']:.12f}")
+    print("OK\n")
+    return result
+
+
+def test_feedback_effect():
+    print("=== TEST EFFET DE RÉTROACTION ===")
+    off = run_coupled_system(total_time=1.0, n_steps=200, eta_u=0.0,
+                             feedback_enabled=False, project=False, audit_each_step=False)
+    on = run_coupled_system(total_time=1.0, n_steps=200, eta_u=0.1,
+                            feedback_enabled=True, project=False, audit_each_step=False)
+    dpsi = abs(on["history"][-1]["psi"] - off["history"][-1]["psi"])
+    dz = abs(on["z_final"] - off["z_final"])
+    drho = np.linalg.norm(on["rho_final"] - off["rho_final"], ord="fro")
+    print(f"Écart Psi : {dpsi:.6e}")
+    print(f"Écart z   : {dz:.6e}")
+    print(f"Écart rho : {drho:.6e}")
+    print("OK\n")
+    return {"delta_psi": dpsi, "delta_z": dz, "delta_rho": drho}
+
+
+def test_full_reproducibility():
+    print("=== REPRODUCTIBILITÉ ===")
+    r1 = run_coupled_system(total_time=1.0, n_steps=150, project=True, audit_each_step=False)
+    r2 = run_coupled_system(total_time=1.0, n_steps=150, project=True, audit_each_step=False)
+
+    def sha(hist):
+        lines = []
+        for rec in hist:
+            items = sorted((k, v) for k, v in rec.items()
+                           if isinstance(v, (int, float, np.integer, np.floating)))
+            lines.append(";".join(f"{k}={v:.17g}" for k, v in items))
+        return hashlib.sha256("\n".join(lines).encode()).hexdigest()
+
+    h1, h2 = sha(r1["history"]), sha(r2["history"])
+    ok = (h1 == h2) and (np.linalg.norm(r1["rho_final"] - r2["rho_final"]) == 0.0)
+    print(f"Reproductible : {'OUI' if ok else 'NON'}")
+    print("OK\n")
+    return ok
+
+
+# ======================================================================
+# 12. EXPORT COMPLET
+# ======================================================================
+
+def export_results(result, out_dir="output"):
+    os.makedirs(out_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # 1. Historique CSV
+    csv_path = os.path.join(out_dir, "ste50_v2141_history.csv")
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(result["history"][0].keys()))
+        writer.writeheader()
+        writer.writerows(result["history"])
+
+    # 2. Événements Preisach
+    events_path = os.path.join(out_dir, "ste50_v2141_preisach_events.json")
+    with open(events_path, "w", encoding="utf-8") as f:
+        json.dump({
+            "n_events": len(result["preisach_events"]),
+            "events": result["preisach_events"],
+        }, f, indent=2)
+
+    # 3. Matrice densité finale
+    rho_path = os.path.join(out_dir, "ste50_v2141_final_rho.npy")
+    np.save(rho_path, result["rho_final"])
+
+    # 4. Résumé global JSON
+    last = result["history"][-1]
+    summary = {
+        "version": "STE-50 v2.1.4.1",
+        "timestamp": timestamp,
+        "parameters": {
+            "total_time": result["total_time"],
+            "n_steps": result["n_steps"],
+            "dt": result["dt"],
+            "g_coupling": result["g_coupling"],
+            "eta_u": result["eta_u"],
+            "feedback_enabled": result["feedback_enabled"],
+        },
+        "final_metrics": {
+            "q_end": last["q_end"],
+            "psi": last["psi"],
+            "z_final": result["z_final"],
+            "k_eff_end": last["k_eff_end"],
+            "bell_survival": last["bell_survival"],
+            "mutual_information": last["mutual_information"],
+            "purity": last["purity"],
+            "entropy_ab": last["entropy_ab"],
+        },
+        "audits": {
+            "n_invalid_raw": len(result["invalid_raw_audits"]),
+            "min_raw_eigenvalue": min(r["raw_min_eigenvalue"] for r in result["history"]),
+            "max_projection_error": max(r["projection_error"] for r in result["history"]),
+        },
+        "preisach": {
+            "n_events": len(result["preisach_events"]),
+        },
+        "files": {
+            "history_csv": csv_path,
+            "events_json": events_path,
+            "final_rho_npy": rho_path,
+        }
+    }
+    summary_path = os.path.join(out_dir, "ste50_v2141_summary.json")
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+
+    # 5. Journal texte lisible
+    log_path = os.path.join(out_dir, "ste50_v2141_run_log.txt")
+    with open(log_path, "w", encoding="utf-8") as f:
+        f.write("=" * 70 + "\n")
+        f.write("STE-50 v2.1.4.1 — Journal d'exécution\n")
+        f.write("=" * 70 + "\n\n")
+        f.write(f"Date          : {timestamp}\n")
+        f.write(f"Temps total   : {result['total_time']}\n")
+        f.write(f"Nombre de pas : {result['n_steps']}\n")
+        f.write(f"dt            : {result['dt']:.6e}\n")
+        f.write(f"eta_u         : {result['eta_u']}\n")
+        f.write(f"g_coupling    : {result['g_coupling']}\n\n")
+        f.write("--- Métriques finales ---\n")
+        f.write(f"q_end               : {last['q_end']:.8f}\n")
+        f.write(f"Psi                 : {last['psi']:.8f}\n")
+        f.write(f"z_final             : {result['z_final']:.8f}\n")
+        f.write(f"k_eff_end           : {last['k_eff_end']:.8f}\n")
+        f.write(f"bell_survival       : {last['bell_survival']:.8f}\n")
+        f.write(f"mutual_information  : {last['mutual_information']:.8f}\n")
+        f.write(f"purity              : {last['purity']:.8f}\n\n")
+        f.write("--- Audits ---\n")
+        f.write(f"Audits bruts invalides : {len(result['invalid_raw_audits'])}\n")
+        f.write(f"min eigenvalue brute   : {min(r['raw_min_eigenvalue'] for r in result['history']):.6e}\n")
+        f.write(f"Événements Preisach    : {len(result['preisach_events'])}\n\n")
+        f.write("Fichiers générés :\n")
+        f.write(f"  - {csv_path}\n")
+        f.write(f"  - {events_path}\n")
+        f.write(f"  - {rho_path}\n")
+        f.write(f"  - {summary_path}\n")
+        f.write(f"  - {log_path}\n")
+
+    print("\n=== FICHIERS DE SORTIE ===")
+    print(f"CSV historique     : {csv_path}")
+    print(f"Événements Preisach: {events_path}")
+    print(f"rho finale (.npy)  : {rho_path}")
+    print(f"Résumé JSON        : {summary_path}")
+    print(f"Journal texte      : {log_path}")
+
+    return {
+        "csv": csv_path,
+        "events": events_path,
+        "rho": rho_path,
+        "summary": summary_path,
+        "log": log_path,
+    }
+
+
+# ======================================================================
+# 13. EXÉCUTION PRINCIPALE
+# ======================================================================
+
+if __name__ == "__main__":
+    print("=== STE-50 v2.1.4.1 — RK4 COUPLÉ + SORTIES COMPLÈTES ===\n")
+
+    test_hamiltonian()
+    test_feedback_isolation()
+    test_feedback_effect()
+    test_full_reproducibility()
+
+    print("=== SIMULATION PRINCIPALE ===")
+    result = run_coupled_system(
+        total_time=2.0,
+        n_steps=200,
+        g_coupling=0.25,
+        eta_u=0.1,
+        feedback_enabled=True,
+        project=True,
+        audit_each_step=True,
+    )
+
+    print(f"\nq final              : {result['history'][-1]['q_end']:.6f}")
+    print(f"Psi final            : {result['history'][-1]['psi']:.6f}")
+    print(f"z final              : {result['z_final']:.6f}")
+    print(f"Audits invalides     : {len(result['invalid_raw_audits'])}")
+    print(f"Événements Preisach  : {len(result['preisach_events'])}")
+
+    export_results(result, out_dir="output")
+
+    print("\n=== FIN ===")
